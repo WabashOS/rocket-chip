@@ -305,10 +305,9 @@ trait HasFPUParameters {
 
   def recode(x: UInt, tag: UInt): UInt = {
     val recoded = floatTypes.map(t => box(t.recode(x)))
-    var res = recoded.head
-    for (((t, prev), r) <- floatTypes.tail zip floatTypes zip recoded)
-      res = Mux(x(t.ieeeWidth-1, prev.ieeeWidth).andR, r, res)
-    res
+    (recoded.head /: (1 until floatTypes.size)) { case (res, i) =>
+      Mux(tag >= i && !x(floatTypes(i).ieeeWidth-1, floatTypes(i-1).ieeeWidth).andR, recoded(i), res)
+    }
   }
   def ieee(x: UInt): UInt = {
     val unrec = floatTypes.map(t => t.ieee(x) | UInt((BigInt(1) << fLen) - (BigInt(1) << t.ieeeWidth)))
