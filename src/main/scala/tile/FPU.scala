@@ -253,8 +253,6 @@ object FType {
   val D = new FType(11, 53)
 
   val all = List(S, D)
-
-  def classify(x: UInt) = all.find(_.recodedWidth == x.getWidth).get
 }
 
 /** Format conversion without rounding or NaN handling */
@@ -276,21 +274,20 @@ trait HasFPUParameters {
   def tagPos = maxType.sig - 1
   def tagMask = UInt(((BigInt(1) << tagWidth) - 1) << tagPos, maxType.recodedWidth)
 
-  def box(x: UInt): UInt = {
-    val xType = FType.classify(x)
-    val xTag = floatTypes.indexOf(xType)
+  def box(x: UInt, xType: FType): UInt = {
+    val xTag = BigInt(floatTypes.indexOf(xType)) << tagPos
     if (xType == maxType) {
       // For max-width NaNs, fill in the tag.
-      Mux(xType.isNaN(x), (x & ~tagMask) | (xTag << tagPos), x)
+      Mux(xType.isNaN(x), (x & ~tagMask) | xTag.U, x)
     } else {
       // Otherwise, box it.
       val exp = BigInt(15) << (maxType.exp + maxType.sig - 3)
       val sig = (BigInt(1) << (maxType.sig - 2)) - (BigInt(1) << xType.recodedWidth)
-      UInt(exp | sig | (xTag << tagPos), maxType.recodedWidth) | x
+      UInt(exp | sig | xTag, maxType.recodedWidth) | x
     }
   }
   def box(x: UInt, tag: UInt): UInt = {
-    val opts = floatTypes.map(t => box(x(t.recodedWidth-1, 0)))
+    val opts = floatTypes.map(t => box(x, t))
     opts(tag)
   }
   def tag(x: UInt): UInt = {
@@ -304,7 +301,7 @@ trait HasFPUParameters {
   }
 
   def recode(x: UInt, tag: UInt): UInt = {
-    val recoded = floatTypes.map(t => box(t.recode(x)))
+    val recoded = floatTypes.map(t => box(t.recode(x), t))
     (recoded.head /: (1 until floatTypes.size)) { case (res, i) =>
       Mux(tag >= i && !x(floatTypes(i).ieeeWidth-1, floatTypes(i-1).ieeeWidth).andR, recoded(i), res)
     }
@@ -336,7 +333,7 @@ class FPToInt(implicit p: Parameters) extends FPUModule()(p) {
 
   when (io.in.valid) {
     in := io.in.bits
-    if (fLen > 32) when (io.in.bits.singleIn) {
+    if (fLen > 32) when (io.in.bits.singleIn && !io.in.bits.rm(0)) {
       in.in1 := FType.S.unsafeConvert(io.in.bits.in1, maxType)
       in.in2 := FType.S.unsafeConvert(io.in.bits.in2, maxType)
     }
@@ -355,8 +352,10 @@ class FPToInt(implicit p: Parameters) extends FPUModule()(p) {
   dcmp.io.b := in.in2
   dcmp.io.signaling := !in.rm(1)
 
-  io.out.bits.store := ieee(in.in1)
-  io.out.bits.toint := Mux(in.rm(0), classify_out, io.out.bits.store)
+  val store = ieee(in.in1)
+  val toint = Mux(in.rm(0), classify_out, store)
+  io.out.bits.store := store
+  io.out.bits.toint := Mux(in.singleOut, toint(31, 0).sextTo(xLen), toint)
   io.out.bits.exc := Bits(0)
 
   when (in.cmd === FCMD_CMP) {
