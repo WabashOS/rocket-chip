@@ -35,6 +35,8 @@ class TileIO(c: TileBundleConfig)(implicit p: Parameters) extends Bundle {
   val interrupts = new TileInterrupts().asInput
   val slave = c.hasSlavePort.option(new ClientUncachedTileLinkIO().flip)
   val resetVector = UInt(INPUT, c.xLen)
+  val rpf_req = Decoupled(Bits(width=64))       // remote page fault request
+  val rpf_res = Decoupled(Bits(width=64)).flip  // remote page fault response
 
   override def cloneType = new TileIO(c).asInstanceOf[this.type]
 }
@@ -138,6 +140,8 @@ class RocketTile(clockSignal: Clock = null, resetSignal: Bool = null)
     ptw.io.requestor <> ptwPorts
     ptw.io.mem +=: dcPorts
     core.io.ptw <> ptw.io.dpath
+    io.rpf_req <> ptw.io.rpf_req
+    ptw.io.rpf_res <> io.rpf_res
   }
 
   io.slave foreach { case slavePort =>

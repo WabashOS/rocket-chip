@@ -207,7 +207,7 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
     }
     is (s_wait_pfa) {
       when (io.rpf_res.valid) {
-        r_pte := io.rpf_res.bits
+        r_pte := (new PTE).fromBits(io.rpf_res.bits)
         state := s_done
       }
     }
