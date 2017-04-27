@@ -37,7 +37,8 @@ class DatapathPTWIO(implicit p: Parameters) extends CoreBundle()(p) {
 }
 
 class PTE(implicit p: Parameters) extends CoreBundle()(p) {
-  val reserved_for_hardware = Bits(width = 16)
+  val reserved_for_hardware = Bits(width = 15)
+  val rem = Bool()
   val ppn = UInt(width = 38)
   val reserved_for_software = Bits(width = 2)
   val d = Bool()
@@ -70,11 +71,12 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
     val requestor = Vec(n, new TLBPTWIO).flip
     val mem = new HellaCacheIO
     val dpath = new DatapathPTWIO
+    val remotepf = Decoupled(Bits(width=64))
   }
 
   require(usingAtomics, "PTW requires atomic memory operations")
 
-  val s_ready :: s_req :: s_wait1 :: s_wait2 :: s_set_dirty :: s_wait1_dirty :: s_wait2_dirty :: s_done :: Nil = Enum(UInt(), 8)
+  val s_ready :: s_req :: s_wait1 :: s_wait2 :: s_set_dirty :: s_wait1_dirty :: s_wait2_dirty :: s_wait_pfa :: s_done :: Nil = Enum(UInt(), 9)
   val state = Reg(init=s_ready)
   val count = Reg(UInt(width = log2Up(pgLevels)))
   val s1_kill = Reg(next = Bool(false))
@@ -82,7 +84,7 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
   val r_req = Reg(new PTWReq)
   val r_req_dest = Reg(Bits())
   val r_pte = Reg(new PTE)
-  
+
   val vpn_idxs = (0 until pgLevels).map(i => (r_req.addr >> (pgLevels-i-1)*pgLevelBits)(pgLevelBits-1,0))
   val vpn_idx = vpn_idxs(count)
 
@@ -129,7 +131,7 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
   val pte_wdata = Wire(init=new PTE().fromBits(0))
   pte_wdata.a := true
   pte_wdata.d := r_req.store
-  
+
   io.mem.req.valid     := state.isOneOf(s_req, s_set_dirty)
   io.mem.req.bits.phys := Bool(true)
   io.mem.req.bits.cmd  := Mux(state === s_set_dirty, M_XA_OR, M_XRD)
@@ -138,7 +140,7 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
   io.mem.s1_data := pte_wdata.asUInt
   io.mem.s1_kill := s1_kill
   io.mem.invalidate_lr := Bool(false)
-  
+
   val resp_ppns = (0 until pgLevels-1).map(i => Cat(pte_addr >> (pgIdxBits + pgLevelBits*(pgLevels-i-1)), r_req.addr(pgLevelBits*(pgLevels-i-1)-1,0))) :+ (pte_addr >> pgIdxBits)
   for (i <- 0 until io.requestor.size) {
     io.requestor(i).resp.valid := state === s_done && (r_req_dest === i)
@@ -148,6 +150,9 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
     io.requestor(i).invalidate := io.dpath.invalidate
     io.requestor(i).status := io.dpath.status
   }
+
+  io.remotepf.valid := state === s_wait_pfa
+  io.remotepf.bits := pte_addr
 
   // control state machine
   switch (state) {
@@ -181,14 +186,26 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
       when (io.mem.resp.valid) {
         state := s_done
         when (pte.access_ok(r_req) && (!pte.a || (r_req.store && !pte.d))) {
+          when (pte.rem) {
+            printf("****remote pte.ppn=%x\n", pte.ppn)
+          }
           state := s_set_dirty
         }.otherwise {
+          when (pte.rem) {
+            printf("****remote2 pte.ppn=%x\n", pte.ppn)
+            state := s_wait_pfa
+          }
           r_pte := pte
         }
         when (pte.table() && count < pgLevels-1) {
           state := s_req
           count := count + 1
         }
+      }
+    }
+    is (s_wait_pfa) {
+      when (io.remotepf.ready) {
+        state := s_req
       }
     }
     is (s_set_dirty) {
