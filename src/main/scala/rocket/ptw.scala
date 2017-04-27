@@ -71,7 +71,8 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
     val requestor = Vec(n, new TLBPTWIO).flip
     val mem = new HellaCacheIO
     val dpath = new DatapathPTWIO
-    val remotepf = Decoupled(Bits(width=64))
+    val rpf_req = Decoupled(Bits(width=64))       // remote page fault request
+    val rpf_res = Decoupled(Bits(width=64)).flip  // remote page fault response
   }
 
   require(usingAtomics, "PTW requires atomic memory operations")
@@ -151,8 +152,9 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
     io.requestor(i).status := io.dpath.status
   }
 
-  io.remotepf.valid := state === s_wait_pfa
-  io.remotepf.bits := pte_addr
+  io.rpf_req.valid := state === s_wait_pfa
+  io.rpf_req.bits := pte_addr
+  io.rpf_res.ready := state === s_wait_pfa
 
   // control state machine
   switch (state) {
@@ -204,8 +206,9 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
       }
     }
     is (s_wait_pfa) {
-      when (io.remotepf.ready) {
-        state := s_req
+      when (io.rpf_res.valid) {
+        r_pte := io.rpf_res.bits
+        state := s_done
       }
     }
     is (s_set_dirty) {
