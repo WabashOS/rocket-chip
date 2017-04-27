@@ -7,6 +7,7 @@ import uncore.tilelink._
 import uncore.util._
 import util._
 import rocket._
+import diplomacy.LazyModule
 
 trait DirectConnection {
   val tiles: Seq[Tile]
@@ -24,18 +25,45 @@ trait DirectConnection {
 
     tile.io.hartid := uncore.hartid
     tile.io.resetVector := uncore.resetVector
+    uncore.rpf_req <> tile.io.rpf_req
+    tile.io.rpf_res <> uncore.rpf_res
   }
 }
 
-class DefaultCoreplex(c: CoreplexConfig)(implicit p: Parameters) extends BaseCoreplex(c)(p) {
+trait RemotePageFault extends LazyModule {
+  // Nothing needed here
+}
+
+trait RemotePageFaultBundle {
+  implicit val p: Parameters
+  val rpf_req = Decoupled(Bits(width=64))       // remote page fault request
+  val rpf_res = Decoupled(Bits(width=64)).flip  // remote page fault response
+}
+
+trait RemotePageFaultModule {
+  val io: RemotePageFaultBundle
+  val outer: RemotePageFault
+  val uncoreTileIOs: Seq[TileIO]
+
+  require(uncoreTileIOs.size == 1)
+
+  uncoreTileIOs.foreach { tile =>
+    io.rpf_req <> tile.rpf_req
+    tile.rpf_res <> io.rpf_res
+  }
+}
+
+class DefaultCoreplex(c: CoreplexConfig)(implicit p: Parameters)
+    extends BaseCoreplex(c)(p) with RemotePageFault {
   override lazy val module = Module(new DefaultCoreplexModule(c, this, new DefaultCoreplexBundle(c)(p))(p))
 }
 
-class DefaultCoreplexBundle(c: CoreplexConfig)(implicit p: Parameters) extends BaseCoreplexBundle(c)(p)
+class DefaultCoreplexBundle(c: CoreplexConfig)(implicit p: Parameters)
+    extends BaseCoreplexBundle(c)(p) with RemotePageFaultBundle
 
 class DefaultCoreplexModule[+L <: DefaultCoreplex, +B <: DefaultCoreplexBundle](
     c: CoreplexConfig, l: L, b: => B)(implicit p: Parameters) extends BaseCoreplexModule(c, l, b)(p)
-    with DirectConnection
+    with DirectConnection with RemotePageFaultModule
 
 /////
 
