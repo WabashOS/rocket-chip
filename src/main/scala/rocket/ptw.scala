@@ -196,8 +196,9 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
           when (pte.rem) {
             printf("****remote2 pte.ppn=%x\n", pte.ppn)
             state := s_wait_pfa
+          }.otherwise {
+            r_pte := pte
           }
-          r_pte := pte
         }
         when (pte.table() && count < pgLevels-1) {
           state := s_req
@@ -208,6 +209,8 @@ class PTW(n: Int)(implicit p: Parameters) extends CoreModule()(p) {
     is (s_wait_pfa) {
       when (io.rpf_res.valid) {
         r_pte := (new PTE).fromBits(io.rpf_res.bits)
+        // TODO: is this way of doing things pushing the new pte
+        // to the pte cache?
         state := s_done
       }
     }
