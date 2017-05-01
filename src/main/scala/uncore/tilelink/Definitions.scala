@@ -124,7 +124,7 @@ trait HasTileLinkBeatId extends HasTileLinkParameters {
 
 /* Client-side transaction id. Usually Miss Status Handling Register File index */
 trait HasClientTransactionId extends HasTileLinkParameters {
-  val client_xact_id = Bits(width = tlClientXactIdBits)
+  val client_xact_id = Bits(width = tlClientXactIdBits + 2)
 }
 
 /** Manager-side transaction id. Usually Transaction Status Handling Register File index. */
