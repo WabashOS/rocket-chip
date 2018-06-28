@@ -11,6 +11,7 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.rocket._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
+import freechips.rocketchip.pfa._
 
 case object SharedMemoryTLEdge extends Field[TLEdgeOut]
 case object TileKey extends Field[TileParams]
@@ -188,6 +189,7 @@ class BaseTileModuleImp[+L <: BaseTile](val outer: L) extends LazyModuleImp(oute
 trait HasExternallyDrivenTileConstants extends Bundle with HasTileParameters {
   val hartid = UInt(INPUT, hartIdLen)
   val reset_vector = UInt(INPUT, resetVectorLen)
+  val pfa = new PFAIO
 }
 
 class TileInputConstants(implicit val p: Parameters) extends ParameterizedBundle with HasExternallyDrivenTileConstants

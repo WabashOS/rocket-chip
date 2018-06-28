@@ -12,6 +12,7 @@ import freechips.rocketchip.tile._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.interrupts._
 import freechips.rocketchip.util._
+import freechips.rocketchip.pfa._
 
 // TODO: how specific are these to RocketTiles?
 case class TileMasterPortParams(buffers: Int = 0, cork: Option[Boolean] = None)
@@ -33,6 +34,7 @@ case object RocketCrossingKey extends Field[Seq[RocketCrossingParams]](List(Rock
 trait HasRocketTiles extends HasTiles
     with HasPeripheryPLIC
     with CanHavePeripheryCLINT
+    with HasPeripheryPFA
     with HasPeripheryDebug { this: BaseSubsystem =>
   val module: HasRocketTilesModuleImp
 
@@ -144,6 +146,8 @@ trait HasRocketTiles extends HasTiles
 trait HasRocketTilesModuleImp extends HasTilesModuleImp
     with HasPeripheryDebugModuleImp {
   val outer: HasRocketTiles
+
+  outer.pfa.module.io.remoteFault <> outer.rocket_tiles(0).module.io.pfa
 }
 
 class RocketSubsystem(implicit p: Parameters) extends BaseSubsystem

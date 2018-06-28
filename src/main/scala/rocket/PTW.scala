@@ -12,6 +12,7 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
 import freechips.rocketchip.util.property._
 import chisel3.internal.sourceinfo.SourceInfo
+import freechips.rocketchip.pfa._
 import scala.collection.mutable.ListBuffer
 
 class PTWReq(implicit p: Parameters) extends CoreBundle()(p) {
@@ -69,14 +70,25 @@ class PTE(implicit p: Parameters) extends CoreBundle()(p) {
   def sx(dummy: Int = 0) = leaf() && x
 }
 
+class RemotePTE(implicit p: Parameters) extends CoreBundle()(p) {
+  val unused = Bits(width = 24)
+  val pageid = Bits(width = 28)
+  val prot = Bits(width = 10)
+  val r = Bool()
+  val v = Bool()
+
+  def remote(dummy: Int = 0) = !v && r
+}
+
 class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(p) {
   val io = new Bundle {
     val requestor = Vec(n, new TLBPTWIO).flip
     val mem = new HellaCacheIO
     val dpath = new DatapathPTWIO
+    val pfa = new PFAIO
   }
 
-  val s_ready :: s_req :: s_wait1 :: s_wait2 :: Nil = Enum(UInt(), 4)
+  val s_ready :: s_req :: s_wait1 :: s_wait2 :: s_pfareq :: s_pfawait :: Nil = Enum(UInt(), 6)
   val state = Reg(init=s_ready)
   val count = Reg(UInt(width = log2Up(pgLevels)))
   val s1_kill = Reg(next = Bool(false))
@@ -201,7 +213,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
 
     (s2_hit, s2_valid && s2_valid_bit, s2_pte, Some(ram))
   }
-  
+
   io.mem.req.valid := state === s_req && !l2_valid
   io.mem.req.bits.phys := Bool(true)
   io.mem.req.bits.cmd  := M_XRD
@@ -210,7 +222,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
   io.mem.s1_kill := s1_kill || l2_hit
   io.mem.s2_kill := Bool(false)
   io.mem.invalidate_lr := Bool(false)
-  
+
   val pmaPgLevelHomogeneous = (0 until pgLevels) map { i =>
     TLBPageLookup(edge.manager.managers, xLen, p(CacheBlockBytes), BigInt(1) << (pgIdxBits + ((pgLevels - 1 - i) * pgLevelBits)))(pte_addr >> pgIdxBits << pgIdxBits).homogeneous
   }
@@ -228,6 +240,15 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     io.requestor(i).status := io.dpath.status
     io.requestor(i).pmp := io.dpath.pmp
   }
+
+  val pfa_pteppn = RegInit(UInt(0, 54))
+  val pfa_rpte = Reg(new RemotePTE)
+  io.pfa.req.valid := state === s_pfareq
+  io.pfa.req.bits.pageid := pfa_rpte.pageid
+  io.pfa.req.bits.protbits := pfa_rpte.prot
+  io.pfa.req.bits.faultvpn := r_req.addr
+  io.pfa.req.bits.pteppn := pfa_pteppn
+  io.pfa.resp.ready := state === s_pfawait
 
   // control state machine
   switch (state) {
@@ -255,20 +276,40 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
       }
       when (io.mem.resp.valid) {
         r_pte := pte
+        pfa_rpte := new RemotePTE().fromBits(io.mem.resp.bits.data)
         when (traverse) {
           state := s_req
           count := count + 1
         }.otherwise {
-          l2_refill := pte.v && !invalid_paddr && count === pgLevels-1
-          resp_ae := pte.v && invalid_paddr
-          state := s_ready
-          resp_valid(r_req_dest) := true
+          when (!pte.v && pte.r && io.pfa.req.ready) {
+            pfa_pteppn := pte_addr
+            state := s_pfareq
+          } .otherwise {
+            l2_refill := pte.v && !invalid_paddr && count === pgLevels-1
+            resp_ae := pte.v && invalid_paddr
+            state := s_ready
+            resp_valid(r_req_dest) := true
+          }
         }
       }
       when (io.mem.s2_xcpt.ae.ld) {
         resp_ae := true
         state := s_ready
         resp_valid(r_req_dest) := true
+      }
+    }
+    is (s_pfareq) {
+      when (io.pfa.req.fire()) {
+        state := s_pfawait
+      }
+    }
+    is (s_pfawait) {
+      when (io.pfa.resp.fire()) {
+        r_pte := new PTE().fromBits(io.pfa.resp.bits)
+        state := s_ready
+        resp_valid(r_req_dest) := true
+        resp_ae := false
+        l2_refill := true
       }
     }
   }

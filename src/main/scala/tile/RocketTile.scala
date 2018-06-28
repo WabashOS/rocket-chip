@@ -12,6 +12,7 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.rocket._
 import freechips.rocketchip.util._
+import freechips.rocketchip.pfa._
 
 case class RocketTileParams(
     core: RocketCoreParams = RocketCoreParams(),
@@ -148,4 +149,5 @@ class RocketTileModuleImp(outer: RocketTile) extends BaseTileModuleImp(outer)
   // TODO figure out how to move the below into their respective mix-ins
   dcacheArb.io.requestor <> dcachePorts
   ptw.io.requestor <> ptwPorts
+  io.pfa := ptw.io.pfa
 }
