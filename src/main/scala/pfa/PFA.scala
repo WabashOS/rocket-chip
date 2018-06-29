@@ -7,7 +7,7 @@ import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.regmapper.{HasRegMap, RegField}
 import freechips.rocketchip.subsystem.BaseSubsystem
 import freechips.rocketchip.tilelink._
-import freechips.rocketchip.util.TwoWayCounter
+import freechips.rocketchip.util.{TwoWayCounter, UIntIsOneOf, DecoupledHelper}
 import freechips.rocketchip.pfa._
 
 class EvictIO extends Bundle {
@@ -37,10 +37,130 @@ class PFAIO extends Bundle {
 
 case class PFAControllerParams(addr: BigInt, beatBytes: Int)
 
-class PFAFetchPath(implicit p: Parameters) extends LazyModule {
-  val tlwriter = LazyModule(new TLWriter("pfa-fetch-modpte"))
-  val writenode = TLIdentityNode()
-  writenode := tlwriter.node
+class PFAClientBundle extends Bundle {
+  val paddr = UInt(64.W)
+  val pageid = UInt(64.W)
+  val dstmac = UInt(48.W)
+}
+
+class PFARemoteMemClient(name: String, val clientAddr: BigInt, val write: Boolean)
+    (implicit p: Parameters) extends LazyModule {
+  val node = TLHelper.makeClientNode(name, IdRange(0, 1))
+
+  lazy val module = new PFARemoteMemClientModule(this)
+}
+
+class PFARemoteMemClientModule(outer: PFARemoteMemClient)
+    extends LazyModuleImp(outer) {
+  val io = IO(new Bundle {
+    val req = Flipped(Decoupled(new PFAClientBundle))
+    val comp = Decoupled(Bool())
+  })
+
+  val clientAddr = outer.clientAddr
+
+  val req = Reg(new PFAClientBundle)
+  // PAGE_READ = 0, PAGE_WRITE = 1
+  val opcode = if (outer.write) 1.U(16.W) else 0.U(16.W)
+  val rmemXact = Reg(UInt(32.W))
+
+  val (tl, edge) = outer.node.out(0)
+  val (s_idle :: s_client_set_acq :: s_client_set_gnt ::
+       s_client_nreq_acq :: s_client_nreq_gnt ::
+       s_client_req_acq  :: s_client_req_gnt  ::
+       s_client_nresp_acq :: s_client_nresp_gnt ::
+       s_client_resp_acq  :: s_client_resp_gnt :: s_comp :: Nil) = Enum(12)
+  val state = RegInit(s_idle)
+
+  // 0x00 - src address (from free queue)
+  // 0x08 - dst address (from free queue)
+  // 0x10 - opcode + remote mac address
+  // 0x18 - remote pageno
+  val setAddrs = VecInit(
+    Seq((if (outer.write) 0x00 else 0x08), 0x10, 0x18)
+      .map(off => (clientAddr + off).U))
+  val setData = VecInit(Seq(
+    req.paddr, Cat(opcode, req.dstmac), req.pageid))
+  val (setIdx, setDone) = Counter(state === s_client_set_gnt && tl.d.valid, 3)
+
+  val setAcq = edge.Put(
+    fromSource = 0.U,
+    toAddress = setAddrs(setIdx),
+    lgSize = 3.U,
+    data = setData(setIdx))._2
+
+  val getAddr = MuxLookup(state, 0.U,
+    Seq((s_client_nreq_acq, 0x28), (s_client_req_acq, 0x20),
+        (s_client_nresp_acq, 0x2C), (s_client_resp_acq, 0x24)).map {
+          case (s, off) => (s -> (clientAddr + off).U) })
+
+  val getAcq = edge.Get(
+    fromSource = 0.U,
+    toAddress = getAddr,
+    lgSize = 2.U)._2
+
+  io.req.ready := state === s_idle
+  io.comp.valid := state === s_comp
+  io.comp.bits := DontCare
+
+  tl.a.valid := state.isOneOf(
+    s_client_set_acq, s_client_nreq_acq, s_client_req_acq,
+    s_client_nresp_acq, s_client_resp_acq)
+  tl.a.bits := Mux(state === s_client_set_acq, setAcq, getAcq)
+  tl.d.ready := state.isOneOf(
+    s_client_set_gnt, s_client_nreq_gnt, s_client_req_gnt,
+    s_client_nresp_gnt, s_client_resp_gnt)
+
+  when (io.req.fire()) {
+    req := io.req.bits
+    state := s_client_set_acq
+  }
+
+  when (tl.a.fire()) {
+    state := MuxLookup(state, state, Seq(
+      s_client_set_acq -> s_client_set_gnt,
+      s_client_nreq_acq -> s_client_nreq_gnt,
+      s_client_req_acq  -> s_client_req_gnt,
+      s_client_nresp_acq -> s_client_nresp_gnt,
+      s_client_resp_acq -> s_client_resp_gnt))
+  }
+
+  when (tl.d.fire()) {
+    val isZero = tl.d.bits.data === 0.U
+    switch (state) {
+      is (s_client_set_gnt) {
+        state := Mux(setDone, s_client_nreq_acq, s_client_set_acq)
+      }
+      is (s_client_nreq_gnt) {
+        state := Mux(isZero, s_client_nreq_acq, s_client_req_acq)
+      }
+      is (s_client_req_gnt) {
+        rmemXact := tl.d.bits.data
+        state := s_client_nresp_acq
+      }
+      is (s_client_nresp_gnt) {
+        state := Mux(isZero, s_client_nresp_acq, s_client_resp_acq)
+      }
+      is (s_client_resp_gnt) {
+        assert(tl.d.bits.data === rmemXact, "PFAFetchPath: ID does not match")
+        state := s_comp
+      }
+    }
+  }
+
+  when (io.comp.fire()) { state := s_idle }
+}
+
+class PFAFetchPath(clientAddr: BigInt)(implicit p: Parameters) extends LazyModule {
+  val client = LazyModule(new PFARemoteMemClient(
+    "pfa-fetch-rmem", clientAddr, false))
+  val writenode = TLHelper.makeClientNode(
+    "pfa-fetch-modpte", IdRange(0, 1))
+
+  val node = TLIdentityNode()
+  node := client.node
+  node := writenode
+
   lazy val module = new PFAFetchPathModule(this)
 }
 
@@ -49,180 +169,112 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
     val fetch = Flipped(new PFAIO)
     val free = Flipped(Decoupled(UInt(64.W)))
     val newpages = new NewpageIO
-    val sendpacket = new SendPacketIO
-    val recvpacket = new RecvPacketIO
     val inprog = Output(Bool())
     val evictinprog = Input(Bool())
+    val dstmac = Input(UInt(48.W))
   })
 
-  val write = outer.tlwriter.module.io.write
-  // s_sendreq: sends a request packet with required pageid
-  // s_nicrecv: writes recv addr (from free queue) to nic recv register
-  // s_modpte: update pte, point to new paddr and mark as not remote and valid
-  val s_idle :: s_sendreq :: s_nicrecv :: s_modpte :: s_comp :: Nil = Enum(5)
-  val send = io.sendpacket
-  val recv = io.recvpacket
-  val sendPktReq = send.req.bits
-  val sendPktHeader = sendPktReq.header
-  val sendPktPayload = sendPktReq.payload
+  val client = outer.client.module
+  val (tl, edge) = outer.writenode.out(0)
 
-  val s = RegInit(s_idle)
-  val targetaddr = Wire(init = io.free.bits)
-  val pageid = RegInit(0.U(28.W))
-  val protbits = RegInit(0.U(10.W))
-  val pteppn = RegInit(0.U(54.W))
-  val faultvpn = RegInit(0.U(27.W))
-  val fetchFired = RegNext(io.fetch.req.fire(), false.B)
-  val sendRespFired = RegNext(send.resp.fire(), false.B)
-  val recvRespFired = RegNext(recv.resp.fire(), false.B)
-  val xactid = Counter(io.fetch.req.fire(), (1 << 16) - 1)._1
-  val frameFrag = Counter(recv.resp.fire(), 3)._1
-  val newpte = RegInit(0.U(64.W))
+  val (s_idle :: s_freepage :: s_request :: s_comp :: Nil) = Enum(4)
+  val state = RegInit(s_idle)
 
-  io.inprog := s != s_idle
+  val (modpte_idle :: modpte_acq :: modpte_gnt :: Nil) = Enum(3)
+  val modpte = RegInit(modpte_idle)
 
-  newpte := ((targetaddr >> 12.U) << 10.U) | protbits
+  val pageid = Reg(UInt(28.W))
+  val protbits = Reg(UInt(10.W))
+  val pteppn = Reg(UInt(54.W))
+  val faultvpn = Reg(UInt(27.W))
+  val paddr = Reg(UInt(64.W))
+  val newpte = Cat(paddr(63, 12), protbits)
 
-  io.fetch.req.ready := s === s_idle && io.free.valid && io.newpages.req.ready && !io.evictinprog
-  io.fetch.resp.valid := s === s_comp
+  io.fetch.req.ready := (state === s_idle) && !io.evictinprog
+  io.free.ready := state === s_freepage
+  io.inprog := state =/= s_idle
+
+  val helper = DecoupledHelper(
+    io.fetch.resp.ready,
+    io.newpages.req.ready,
+    client.io.comp.valid)
+  val canComp = state === s_comp && modpte === modpte_idle
+
+  client.io.req.valid := state === s_request
+  client.io.req.bits.paddr := paddr
+  client.io.req.bits.dstmac := io.dstmac
+  client.io.req.bits.pageid := pageid
+  client.io.comp.ready := helper.fire(client.io.comp.valid, canComp)
+
+  io.fetch.resp.valid := helper.fire(io.fetch.resp.ready, canComp)
   io.fetch.resp.bits := newpte
 
-  io.free.ready := false.B
-
-  io.newpages.req.valid := s === s_comp
+  io.newpages.req.valid := helper.fire(io.newpages.req.ready, canComp)
   io.newpages.req.bits.pageid := pageid
   io.newpages.req.bits.vaddr := faultvpn << 12.U
 
-  send.req.valid := s === s_sendreq && fetchFired
-  send.resp.ready := s === s_sendreq
-  // we don't need a payload
-  sendPktPayload.addr := 0.U
-  sendPktPayload.len := 0.U
-  sendPktHeader.opcode := 0.U // read
-  sendPktHeader.partid := 0.U
-  sendPktHeader.pageid := pageid
-  sendPktHeader.xactid := xactid
-
-  recv.req.valid := MuxCase(false.B, Array(
-              (s === s_nicrecv && frameFrag === 0.U) -> sendRespFired,
-              (s === s_nicrecv && frameFrag === 1.U) -> recvRespFired,
-              (s === s_nicrecv && frameFrag === 2.U) -> recvRespFired))
-  recv.resp.ready := s === s_nicrecv
-  recv.req.bits.taddr := MuxCase(targetaddr, Array(
-              (frameFrag === 1.U) -> (targetaddr + 1368.U),
-              (frameFrag === 2.U) -> (targetaddr + 2736.U)))
-
-  write.req.valid := s === s_modpte && recvRespFired
-  write.req.bits.data := newpte
-  write.req.bits.addr := pteppn
-  write.resp.ready := s === s_modpte
+  tl.a.valid := modpte === modpte_acq
+  tl.a.bits := edge.Put(
+    fromSource = 0.U,
+    toAddress = pteppn,
+    lgSize = 3.U,
+    data = newpte)._2
+  tl.d.ready := modpte === modpte_gnt
 
   when (io.fetch.req.fire()) {
     pageid := io.fetch.req.bits.pageid
     protbits := io.fetch.req.bits.protbits
     pteppn := io.fetch.req.bits.pteppn
     faultvpn := io.fetch.req.bits.faultvpn
-    s := s_sendreq
+    state := s_freepage
   }
 
-  when (send.resp.fire()) {
-    s := s_nicrecv
+  when (io.free.fire()) {
+    paddr := io.free.bits
+    modpte := modpte_acq
+    state := s_request
   }
 
-  // move to s_modpte when we are done receiving the frame completely
-  when (recv.resp.fire()) {
-    s := Mux(frameFrag === 2.U, s_modpte, s_nicrecv)
-  }
+  when (client.io.req.fire()) { state := s_comp }
 
-  // write request to update pte is done
-  when (write.resp.fire()) {
-    s := s_comp
-  }
+  when (tl.a.fire()) { modpte := modpte_gnt }
 
-  when (io.fetch.resp.fire()) {
-    io.free.ready := true.B
-    s := s_idle
-  }
+  when (tl.d.fire()) { modpte := modpte_idle }
+
+  when (io.fetch.resp.fire()) { state := s_idle }
 }
 
-class PFAEvictPath(nicaddr: BigInt)(implicit p: Parameters) extends LazyModule {
-  lazy val module = new PFAEvictPathModule(this, nicaddr)
+class PFAEvictPath(clientAddr: BigInt)(implicit p: Parameters) extends LazyModule {
+  val client = LazyModule(new PFARemoteMemClient(
+    "pfa-evict-path", clientAddr, true))
+  val node = client.node
+  lazy val module = new PFAEvictPathModule(this)
 }
 
-class PFAEvictPathModule(outer: PFAEvictPath, nicaddr: BigInt) extends LazyModuleImp(outer) {
+class PFAEvictPathModule(outer: PFAEvictPath) extends LazyModuleImp(outer) {
   val io = IO(new Bundle {
     val evict = Flipped(new EvictIO)
-    val sendpacket = new SendPacketIO
+    val dstmac = Input(UInt(48.W))
     val inprog = Output(Bool())
   })
 
-  val s_idle :: s_frame1 :: s_frame2 :: s_frame3 :: s_comp :: Nil = Enum(5)
-  val send = io.sendpacket
-  val pktRequest = io.sendpacket.req.bits
-  val pktHeader = pktRequest.header
-  val pktPayload = pktRequest.payload
+  val client = outer.client.module
+  client.io.req.valid := io.evict.req.valid
+  client.io.req.bits.paddr := Cat(io.evict.req.bits(35, 0), 0.U(12.W))
+  client.io.req.bits.pageid := io.evict.req.bits(63, 36)
+  client.io.req.bits.dstmac := io.dstmac
+  io.evict.req.ready := client.io.req.ready
+  io.evict.resp <> client.io.comp
 
-  val s = RegInit(s_idle)
-  val frameaddr = RegInit(0.U(64.W))
-  val sendCompFired = RegNext(send.resp.fire(), false.B)
-  val evictFired = RegNext(io.evict.req.fire(), false.B)
-  val pageid = RegInit(0.U(32.W))
-  val xactid = Counter(io.evict.req.fire(), (1 << 16) - 1)._1
-
-  io.inprog := s != s_idle
-
-  io.evict.req.ready := s === s_idle
-  io.evict.resp.valid := s === s_comp
-  io.evict.resp.bits := true.B
-
-  send.req.valid := MuxCase(0.U, Array(
-            (s === s_frame1) -> evictFired,
-            (s === s_frame2 || s === s_frame3) -> sendCompFired))
-
-  pktPayload.addr := MuxCase(0.U, Array(
-            (s === s_frame1) -> (frameaddr),
-            (s === s_frame2) -> (frameaddr + 1368.U),
-            (s === s_frame3) -> (frameaddr + 2736.U)))
-  pktPayload.len := MuxCase(0.U, Array(
-            (s === s_frame1) -> 1368.U,
-            (s === s_frame2) -> 1368.U,
-            (s === s_frame3) -> 1360.U))
-
-  pktHeader.opcode := 1.U // write
-  pktHeader.partid := MuxCase(0.U, Array(
-            (s === s_frame1) -> 0.U,
-            (s === s_frame2) -> 1.U,
-            (s === s_frame3) -> 2.U))
-  pktHeader.pageid := pageid
-  pktHeader.xactid := xactid
-
-  send.resp.ready := s === s_frame1 || s === s_frame2 || s === s_frame3
-
-  when (io.evict.req.fire()) {
-    pageid := io.evict.req.bits(63,36)
-    frameaddr := io.evict.req.bits(35,0) << 12
-    s := s_frame1
-  }
-
-  when (send.resp.fire()) {
-    switch (s) {
-      is (s_frame1) { s := s_frame2 }
-      is (s_frame2) { s := s_frame3 }
-      is (s_frame3) { s := s_comp }
-    }
-  }
-
-  when (io.evict.resp.fire()) {
-    s := s_idle
-  }
+  io.inprog := !client.io.req.ready || client.io.comp.valid
 }
 
 trait PFAControllerBundle extends Bundle {
   val evict = new EvictIO
   val newpages = Flipped(new NewpageIO)
   val free = Decoupled(UInt(64.W))
-  val workbuf = Valid(UInt(39.W))
   val fetchinprog = Input(Bool())
+  val dstmac = Output(UInt(64.W))
 }
 
 trait PFAControllerModule extends HasRegMap {
@@ -237,11 +289,6 @@ trait PFAControllerModule extends HasRegMap {
   evictStat := Mux(io.fetchinprog, qDepth.U,
                    Mux(evictsInProg > evictQueue.io.count, evictsInProg, evictQueue.io.count))
 
-  val workbufQueue = Module(new Queue(UInt(64.W), 1))
-  io.workbuf.bits <> workbufQueue.io.deq.bits(38, 0)
-  io.workbuf.valid <> workbufQueue.io.deq.valid
-  workbufQueue.io.deq.ready := false.B
-
   val freeQueue = Module(new Queue(UInt(64.W), qDepth))
   io.free <> freeQueue.io.deq
 
@@ -253,6 +300,9 @@ trait PFAControllerModule extends HasRegMap {
   newPageidQueue.io.enq.bits := io.newpages.req.bits.pageid
   newVaddrQueue.io.enq.bits := io.newpages.req.bits.vaddr
 
+  val dstmac = Reg(UInt(48.W))
+  io.dstmac := dstmac
+
   regmap(
     0 -> Seq(RegField.w(64, freeQueue.io.enq)),              // free queue
     8 -> Seq(RegField.r(64, qDepth.U - freeQueue.io.count)), // free stat
@@ -261,7 +311,7 @@ trait PFAControllerModule extends HasRegMap {
     32 -> Seq(RegField.r(64, newPageidQueue.io.deq)),        // new pageid queue
     40 -> Seq(RegField.r(64, newVaddrQueue.io.deq)),         // new vaddr queue
     48 -> Seq(RegField.r(64, newPageidQueue.io.count)),      // new stat
-    56 -> Seq(RegField.w(64, workbufQueue.io.enq)))          // workbuf
+    56 -> Seq(RegField(48, dstmac)))          // remote MAC
 }
 
 class PFAController(c: PFAControllerParams)(implicit p: Parameters)
@@ -270,55 +320,44 @@ class PFAController(c: PFAControllerParams)(implicit p: Parameters)
                             new TLRegBundle(c, _) with PFAControllerBundle)(
                             new TLRegModule(c, _, _) with PFAControllerModule)
 
-class PFA(addr: BigInt, nicaddr: BigInt, beatBytes: Int = 8)(implicit p: Parameters)
+class PFA(addr: BigInt, clientAddr: BigInt, beatBytes: Int = 8)(implicit p: Parameters)
     extends LazyModule {
   val control = LazyModule(new PFAController(
       PFAControllerParams(addr, beatBytes)))
-  val fetchPath = LazyModule(new PFAFetchPath)
-  val evictPath = LazyModule(new PFAEvictPath(nicaddr))
-  val sendframePkt1 = LazyModule(new SendPacket(nicaddr, "pfa-sendframe1"))
-  val sendframePkt2 = LazyModule(new SendPacket(nicaddr, "pfa-sendframe2")) // TODO: use arb instead
-  val recvframePkt = LazyModule(new RecvPacket(nicaddr, "pfa-recvframe1"))
+  val fetchPath = LazyModule(new PFAFetchPath(clientAddr))
+  val evictPath = LazyModule(new PFAEvictPath(clientAddr))
 
   val mmionode = TLIdentityNode()
   val dmanode = TLIdentityNode()
 
-  control.node := mmionode;
-  dmanode := sendframePkt1.writenode
-  dmanode := sendframePkt1.readnode
-  dmanode := sendframePkt2.writenode
-  dmanode := sendframePkt2.readnode
-  dmanode := recvframePkt.writenode
-  dmanode := recvframePkt.readnode
-  dmanode := fetchPath.writenode
+  control.node := mmionode
+  dmanode :=* fetchPath.node
+  dmanode :=* evictPath.node
 
   lazy val module = new LazyModuleImp(this) {
     val io = IO(new Bundle {
       val remoteFault = Flipped(new PFAIO)
     })
 
-    sendframePkt1.module.io.workbuf <> control.module.io.workbuf
-    sendframePkt2.module.io.workbuf <> control.module.io.workbuf
-
     evictPath.module.io.evict <> control.module.io.evict
-    evictPath.module.io.sendpacket <> sendframePkt1.module.io.sendpacket
-    evictPath.module.io.inprog <> fetchPath.module.io.evictinprog
+    evictPath.module.io.dstmac := control.module.io.dstmac
+    fetchPath.module.io.evictinprog := evictPath.module.io.inprog
 
     io.remoteFault <> fetchPath.module.io.fetch
-    fetchPath.module.io.sendpacket <> sendframePkt2.module.io.sendpacket
-    fetchPath.module.io.recvpacket <> recvframePkt.module.io.recvpacket
     fetchPath.module.io.free <> control.module.io.free
+    fetchPath.module.io.dstmac := control.module.io.dstmac
     control.module.io.newpages <> fetchPath.module.io.newpages
-    control.module.io.fetchinprog <> fetchPath.module.io.inprog
+    control.module.io.fetchinprog := fetchPath.module.io.inprog
   }
 }
 
 trait HasPeripheryPFA { this: BaseSubsystem =>
-  private val nicaddr = BigInt(0x10016000)
-  private val pfaaddr = BigInt(0x10017000)
+
+  private val clientAddr = BigInt(0x10018000)
+  private val pfaAddr = BigInt(0x10017000)
   private val portName = "PFA"
 
-  val pfa = LazyModule(new PFA(pfaaddr, nicaddr, sbus.beatBytes))
+  val pfa = LazyModule(new PFA(pfaAddr, clientAddr, sbus.beatBytes))
   sbus.toVariableWidthSlave(Some(portName)) { pfa.mmionode }
   sbus.fromPort(Some(portName))() :=* pfa.dmanode
 }
