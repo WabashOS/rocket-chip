@@ -2,10 +2,10 @@ package freechips.rocketchip.pfa
 
 import chisel3._
 import chisel3.util._
-import freechips.rocketchip.coreplex.HasSystemBus
 import freechips.rocketchip.config.{Field, Parameters}
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.regmapper.{HasRegMap, RegField}
+import freechips.rocketchip.subsystem.BaseSubsystem
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util.TwoWayCounter
 import freechips.rocketchip.pfa._
@@ -313,11 +313,12 @@ class PFA(addr: BigInt, nicaddr: BigInt, beatBytes: Int = 8)(implicit p: Paramet
   }
 }
 
-trait HasPeripheryPFA extends HasSystemBus {
+trait HasPeripheryPFA { this: BaseSubsystem =>
   private val nicaddr = BigInt(0x10016000)
   private val pfaaddr = BigInt(0x10017000)
+  private val portName = "PFA"
 
   val pfa = LazyModule(new PFA(pfaaddr, nicaddr, sbus.beatBytes))
-  pfa.mmionode := sbus.toVariableWidthSlaves
-  sbus.fromSyncPorts() :=* pfa.dmanode
+  sbus.toVariableWidthSlave(Some(portName)) { pfa.mmionode }
+  sbus.fromPort(Some(portName))() :=* pfa.dmanode
 }

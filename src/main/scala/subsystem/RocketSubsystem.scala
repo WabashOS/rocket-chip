@@ -147,7 +147,7 @@ trait HasRocketTilesModuleImp extends HasTilesModuleImp
     with HasPeripheryDebugModuleImp {
   val outer: HasRocketTiles
 
-  outer.pfa.module.io.remoteFault <> outer.rocket_tiles(0).module.io.pfa
+  outer.pfa.module.io.remoteFault <> outer.rocketTiles(0).module.pfa
 }
 
 class RocketSubsystem(implicit p: Parameters) extends BaseSubsystem

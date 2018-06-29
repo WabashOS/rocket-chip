@@ -102,6 +102,7 @@ class RocketTileModuleImp(outer: RocketTile) extends BaseTileModuleImp(outer)
     with HasICacheFrontendModule {
   annotated.params(this, outer.rocketParams)
 
+  val pfa = IO(new PFAIO)
   val core = Module(p(BuildCore)(outer.p))
 
   val uncorrectable = RegInit(Bool(false))
@@ -149,5 +150,5 @@ class RocketTileModuleImp(outer: RocketTile) extends BaseTileModuleImp(outer)
   // TODO figure out how to move the below into their respective mix-ins
   dcacheArb.io.requestor <> dcachePorts
   ptw.io.requestor <> ptwPorts
-  io.pfa := ptw.io.pfa
+  pfa <> ptw.io.pfa
 }
