@@ -177,7 +177,7 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
   val client = outer.client.module
   val (tl, edge) = outer.writenode.out(0)
 
-  val (s_idle :: s_freepage :: s_request :: s_comp :: Nil) = Enum(4)
+  val (s_idle :: s_request :: s_comp :: Nil) = Enum(3)
   val state = RegInit(s_idle)
 
   val (modpte_idle :: modpte_acq :: modpte_gnt :: Nil) = Enum(3)
@@ -190,11 +190,12 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
   val paddr = Reg(UInt(64.W))
   val newpte = Cat(paddr(63, 12), protbits)
 
-  io.fetch.req.ready := (state === s_idle) && !io.evictinprog
-  io.free.ready := state === s_freepage
+  val canTakeReq = (state === s_idle) && !io.evictinprog
+  io.fetch.req.ready := io.free.valid && canTakeReq
+  io.free.ready := io.fetch.req.valid && canTakeReq
   io.inprog := state =/= s_idle
 
-  val helper = DecoupledHelper(
+  val compHelper = DecoupledHelper(
     io.fetch.resp.ready,
     io.newpages.req.ready,
     client.io.comp.valid)
@@ -204,12 +205,12 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
   client.io.req.bits.paddr := paddr
   client.io.req.bits.dstmac := io.dstmac
   client.io.req.bits.pageid := pageid
-  client.io.comp.ready := helper.fire(client.io.comp.valid, canComp)
+  client.io.comp.ready := compHelper.fire(client.io.comp.valid, canComp)
 
-  io.fetch.resp.valid := helper.fire(io.fetch.resp.ready, canComp)
+  io.fetch.resp.valid := compHelper.fire(io.fetch.resp.ready, canComp)
   io.fetch.resp.bits := newpte
 
-  io.newpages.req.valid := helper.fire(io.newpages.req.ready, canComp)
+  io.newpages.req.valid := compHelper.fire(io.newpages.req.ready, canComp)
   io.newpages.req.bits.pageid := pageid
   io.newpages.req.bits.vaddr := faultvpn << 12.U
 
@@ -226,13 +227,12 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
     protbits := io.fetch.req.bits.protbits
     pteppn := io.fetch.req.bits.pteppn
     faultvpn := io.fetch.req.bits.faultvpn
-    state := s_freepage
+    state := s_request
   }
 
   when (io.free.fire()) {
     paddr := io.free.bits
     modpte := modpte_acq
-    state := s_request
   }
 
   when (client.io.req.fire()) { state := s_comp }
