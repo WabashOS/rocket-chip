@@ -71,7 +71,7 @@ class PTE(implicit p: Parameters) extends CoreBundle()(p) {
 }
 
 class RemotePTE(implicit p: Parameters) extends CoreBundle()(p) {
-  val unused = Bits(width = 24)
+  val reserved = Bits(width = 24)
   val pageid = Bits(width = 28)
   val prot = Bits(width = 10)
   val r = Bool()
@@ -244,6 +244,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
   val pfa_pteppn = RegInit(UInt(0, 54))
   val pfa_rpte = Reg(new RemotePTE)
   io.pfa.req.valid := state === s_pfareq
+  io.pfa.req.bits.reserved := pfa_rpte.reserved
   io.pfa.req.bits.pageid := pfa_rpte.pageid
   io.pfa.req.bits.protbits := pfa_rpte.prot
   io.pfa.req.bits.faultvpn := r_req.addr
@@ -281,7 +282,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
           state := s_req
           count := count + 1
         }.otherwise {
-          when (!pte.v && pte.r && io.pfa.req.ready) {
+          when (!pte.v && pte.r && io.pfa.fpq_avail) {
             pfa_pteppn := pte_addr
             state := s_pfareq
           } .otherwise {

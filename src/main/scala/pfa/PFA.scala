@@ -17,22 +17,29 @@ class EvictIO extends Bundle {
   val resp = Flipped(Decoupled(Bool()))
 }
 
+class NewPageRequest extends Bundle {
+  val reserved = UInt(24.W)
+  val pageid = UInt(28.W)
+  val vaddr = UInt(39.W)
+}
+
 class NewpageIO extends Bundle {
-  val req = Decoupled(new Bundle {
-    val pageid = UInt(28.W)
-    val vaddr = UInt(39.W)
-  })
+  val req = Decoupled(new NewPageRequest)
+}
+
+class PFARequest extends Bundle {
+  val reserved = UInt(24.W)
+  val pageid = UInt(28.W)
+  val protbits = UInt(10.W)
+  val faultvpn = UInt(27.W)
+  val pteppn = UInt(54.W)
 }
 
 class PFAIO extends Bundle {
   // the ptw drives the requests
-  val req = Decoupled(new Bundle {
-    val pageid = UInt(28.W)
-    val protbits = UInt(10.W)
-    val faultvpn = UInt(27.W)
-    val pteppn = UInt(54.W)
-  })
+  val req = Decoupled(new PFARequest)
   val resp = Flipped(Decoupled(UInt(64.W))) // pfa's replies TODO: whats this for?
+  val fpq_avail = Input(Bool())
 }
 
 case class PFAControllerParams(addr: BigInt, beatBytes: Int)
@@ -183,6 +190,7 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
   val (modpte_idle :: modpte_acq :: modpte_gnt :: Nil) = Enum(3)
   val modpte = RegInit(modpte_idle)
 
+  val reserved = Reg(UInt(24.W))
   val pageid = Reg(UInt(28.W))
   val protbits = Reg(UInt(10.W))
   val pteppn = Reg(UInt(54.W))
@@ -193,6 +201,7 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
   val canTakeReq = (state === s_idle) && !io.evictinprog
   io.fetch.req.ready := io.free.valid && canTakeReq
   io.free.ready := io.fetch.req.valid && canTakeReq
+  io.fetch.fpq_avail := io.free.valid
   io.inprog := state =/= s_idle
 
   val compHelper = DecoupledHelper(
@@ -211,6 +220,7 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
   io.fetch.resp.bits := newpte
 
   io.newpages.req.valid := compHelper.fire(io.newpages.req.ready, canComp)
+  io.newpages.req.bits.reserved := reserved
   io.newpages.req.bits.pageid := pageid
   io.newpages.req.bits.vaddr := faultvpn << 12.U
 
@@ -223,6 +233,7 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
   tl.d.ready := modpte === modpte_gnt
 
   when (io.fetch.req.fire()) {
+    reserved := io.fetch.req.bits.reserved
     pageid := io.fetch.req.bits.pageid
     protbits := io.fetch.req.bits.protbits
     pteppn := io.fetch.req.bits.pteppn
@@ -292,12 +303,12 @@ trait PFAControllerModule extends HasRegMap {
   val freeQueue = Module(new Queue(UInt(64.W), qDepth))
   io.free <> freeQueue.io.deq
 
-  val newPageidQueue = Module(new Queue(UInt(28.W), qDepth))
+  val newPageidQueue = Module(new Queue(UInt(52.W), qDepth))
   val newVaddrQueue = Module(new Queue(UInt(39.W), qDepth))
   newPageidQueue.io.enq.valid := io.newpages.req.valid
   newVaddrQueue.io.enq.valid := io.newpages.req.valid
   io.newpages.req.ready := newPageidQueue.io.enq.ready && newVaddrQueue.io.enq.ready
-  newPageidQueue.io.enq.bits := io.newpages.req.bits.pageid
+  newPageidQueue.io.enq.bits := Cat(io.newpages.req.bits.reserved, io.newpages.req.bits.pageid)
   newVaddrQueue.io.enq.bits := io.newpages.req.bits.vaddr
 
   val dstmac = Reg(UInt(48.W))
