@@ -147,17 +147,19 @@ trait HasRocketTilesModuleImp extends HasTilesModuleImp
     with HasPeripheryDebugModuleImp {
   val outer: HasRocketTiles
 
-  val remoteFault = outer.pfa.module.io.remoteFault
-  val arb = Module(new InOrderArbiter(
-    new PFARequest, UInt(64.W), outer.rocketTiles.size))
+  outer.pfaOpt.foreach { pfa =>
+    val remoteFault = pfa.module.io.remoteFault
+    val arb = Module(new InOrderArbiter(
+      new PFARequest, UInt(64.W), outer.rocketTiles.size))
 
-  outer.rocketTiles.zipWithIndex.foreach { case (tile, i) =>
-    arb.io.in_req(i) <> tile.module.pfa.req
-    tile.module.pfa.resp <> arb.io.in_resp(i)
-    tile.module.pfa.fpq_avail := remoteFault.fpq_avail
+    outer.rocketTiles.zipWithIndex.foreach { case (tile, i) =>
+      arb.io.in_req(i) <> tile.module.pfa.req
+      tile.module.pfa.resp <> arb.io.in_resp(i)
+      tile.module.pfa.fpq_avail := remoteFault.fpq_avail
+    }
+    remoteFault.req <> arb.io.out_req
+    arb.io.out_resp <> remoteFault.resp
   }
-  remoteFault.req <> arb.io.out_req
-  arb.io.out_resp <> remoteFault.resp
 }
 
 class RocketSubsystem(implicit p: Parameters) extends BaseSubsystem

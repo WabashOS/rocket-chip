@@ -8,6 +8,7 @@ import freechips.rocketchip.config._
 import freechips.rocketchip.devices.debug._
 import freechips.rocketchip.devices.tilelink._
 import freechips.rocketchip.diplomacy._
+import freechips.rocketchip.pfa.HasPFA
 import freechips.rocketchip.rocket._
 import freechips.rocketchip.tile._
 import freechips.rocketchip.tilelink._
@@ -29,6 +30,7 @@ class BaseSubsystemConfig extends Config ((site, here, up) => {
   case BootROMParams => BootROMParams(contentFileName = "./bootrom/bootrom.img")
   case DebugModuleParams => DefaultDebugModuleParams(site(XLen))
   case CLINTKey => Some(CLINTParams())
+  case HasPFA => false
 })
 
 /* Composable partial function Configs to set individual parameters */

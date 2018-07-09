@@ -243,13 +243,15 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
 
   val pfa_pteppn = RegInit(UInt(0, 54))
   val pfa_rpte = Reg(new RemotePTE)
-  io.pfa.req.valid := state === s_pfareq
-  io.pfa.req.bits.reserved := pfa_rpte.reserved
-  io.pfa.req.bits.pageid := pfa_rpte.pageid
-  io.pfa.req.bits.protbits := pfa_rpte.prot
-  io.pfa.req.bits.faultvpn := r_req.addr
-  io.pfa.req.bits.pteppn := pfa_pteppn
-  io.pfa.resp.ready := state === s_pfawait
+  if (p(HasPFA)) {
+    io.pfa.req.valid := state === s_pfareq
+    io.pfa.req.bits.reserved := pfa_rpte.reserved
+    io.pfa.req.bits.pageid := pfa_rpte.pageid
+    io.pfa.req.bits.protbits := pfa_rpte.prot
+    io.pfa.req.bits.faultvpn := r_req.addr
+    io.pfa.req.bits.pteppn := pfa_pteppn
+    io.pfa.resp.ready := state === s_pfawait
+  }
 
   // control state machine
   switch (state) {
@@ -277,12 +279,12 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
       }
       when (io.mem.resp.valid) {
         r_pte := pte
-        pfa_rpte := new RemotePTE().fromBits(io.mem.resp.bits.data)
         when (traverse) {
           state := s_req
           count := count + 1
         }.otherwise {
-          when (!pte.v && pte.r && io.pfa.fpq_avail) {
+          when (!pte.v && pte.r && io.pfa.fpq_avail && Bool(p(HasPFA))) {
+            pfa_rpte := new RemotePTE().fromBits(io.mem.resp.bits.data)
             pfa_pteppn := pte_addr
             state := s_pfareq
           } .otherwise {
@@ -300,12 +302,12 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
       }
     }
     is (s_pfareq) {
-      when (io.pfa.req.fire()) {
+      when (io.pfa.req.fire() && Bool(p(HasPFA))) {
         state := s_pfawait
       }
     }
     is (s_pfawait) {
-      when (io.pfa.resp.fire()) {
+      when (io.pfa.resp.fire() && Bool(p(HasPFA))) {
         r_pte := new PTE().fromBits(io.pfa.resp.bits)
         state := s_ready
         resp_valid(r_req_dest) := true
