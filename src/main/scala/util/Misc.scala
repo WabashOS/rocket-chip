@@ -24,6 +24,7 @@ object DecoupledHelper {
 
 class DecoupledHelper(val rvs: Seq[Bool]) {
   def fire(exclude: Bool, includes: Bool*) = {
+    require(rvs.contains(exclude), "Excluded Bool not present in DecoupledHelper! Note that DecoupledHelper uses referential equality for exclusion!")
     (rvs.filter(_ ne exclude) ++ includes).reduce(_ && _)
   }
 }
@@ -199,7 +200,7 @@ object MaskGen {
     require (groupBy >= 1 && beatBytes >= groupBy)
     require (isPow2(beatBytes) && isPow2(groupBy))
     val lgBytes = log2Ceil(beatBytes)
-    val sizeOH = UIntToOH(lgSize, log2Up(beatBytes)) | UInt(groupBy*2 - 1)
+    val sizeOH = UIntToOH(lgSize | 0.U(log2Up(beatBytes).W), log2Up(beatBytes)) | UInt(groupBy*2 - 1)
 
     def helper(i: Int): Seq[(Bool, Bool)] = {
       if (i == 0) {

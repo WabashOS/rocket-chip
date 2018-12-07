@@ -14,23 +14,26 @@ import freechips.rocketchip.tile._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
 
+// Fields for top-level system parameterization
+case object ErrorDeviceKey extends Field[ErrorParams]
+
 class BaseSubsystemConfig extends Config ((site, here, up) => {
   // Tile parameters
   case PgLevels => if (site(XLen) == 64) 3 /* Sv39 */ else 2 /* Sv32 */
   case XLen => 64 // Applies to all cores
   case MaxHartIdBits => log2Up(site(RocketTilesKey).size)
-  case BuildCore => (p: Parameters) => new Rocket()(p)
   // Interconnect parameters
   case SystemBusKey => SystemBusParams(beatBytes = site(XLen)/8, blockBytes = site(CacheBlockBytes))
   case PeripheryBusKey => PeripheryBusParams(beatBytes = site(XLen)/8, blockBytes = site(CacheBlockBytes))
   case MemoryBusKey => MemoryBusParams(beatBytes = site(XLen)/8, blockBytes = site(CacheBlockBytes))
   case FrontBusKey => FrontBusParams(beatBytes = site(XLen)/8, blockBytes = site(CacheBlockBytes))
   // Additional device Parameters
-  case ErrorParams => ErrorParams(Seq(AddressSet(0x3000, 0xfff)), maxAtomic=site(XLen)/8, maxTransfer=4096)
+  case ErrorDeviceKey => ErrorParams(Seq(AddressSet(0x3000, 0xfff)), maxAtomic=site(XLen)/8, maxTransfer=4096)
   case BootROMParams => BootROMParams(contentFileName = "./bootrom/bootrom.img")
   case DebugModuleParams => DefaultDebugModuleParams(site(XLen))
   case CLINTKey => Some(CLINTParams())
   case HasPFA => false
+  case PLICKey => Some(PLICParams())
 })
 
 /* Composable partial function Configs to set individual parameters */
@@ -99,7 +102,7 @@ class With1TinyCore extends Config((site, here, up) => {
         blockBytes = site(CacheBlockBytes)))))
   case RocketCrossingKey => List(RocketCrossingParams(
     crossingType = SynchronousCrossing(),
-    master = TileMasterPortParams(cork = Some(true))
+    master = TileMasterPortParams()
   ))
 })
 
@@ -187,28 +190,19 @@ class WithNBreakpoints(hwbp: Int) extends Config ((site, here, up) => {
 })
 
 class WithRoccExample extends Config((site, here, up) => {
-  case RocketTilesKey => up(RocketTilesKey, site) map { r =>
-    r.copy(rocc =
-      Seq(
-        RoCCParams(
-          opcodes = OpcodeSet.custom0,
-          generator = (p: Parameters) => {
-            val accumulator = LazyModule(new AccumulatorExample()(p))
-            accumulator}),
-        RoCCParams(
-          opcodes = OpcodeSet.custom1,
-          generator = (p: Parameters) => {
-            val translator = LazyModule(new TranslatorExample()(p))
-            translator},
-          nPTWPorts = 1),
-        RoCCParams(
-          opcodes = OpcodeSet.custom2,
-          generator = (p: Parameters) => {
-            val counter = LazyModule(new CharacterCountExample()(p))
-            counter
-          })
-        ))
-    }
+  case BuildRoCC => List(
+    (p: Parameters) => {
+        val accumulator = LazyModule(new AccumulatorExample(OpcodeSet.custom0, n = 4)(p))
+        accumulator
+    },
+    (p: Parameters) => {
+        val translator = LazyModule(new TranslatorExample(OpcodeSet.custom1)(p))
+        translator
+    },
+    (p: Parameters) => {
+        val counter = LazyModule(new CharacterCountExample(OpcodeSet.custom2)(p))
+        counter
+    })
 })
 
 class WithDefaultBtb extends Config((site, here, up) => {
@@ -342,7 +336,7 @@ class WithNoSlavePort extends Config((site, here, up) => {
 class WithScratchpadsOnly extends Config((site, here, up) => {
   case RocketTilesKey => up(RocketTilesKey, site) map { r =>
     r.copy(
-      core = RocketCoreParams(useVM = false),
+      core = r.core.copy(useVM = false),
       dcache = r.dcache.map(_.copy(
         nSets = 256, // 16Kb scratchpad
         nWays = 1,

@@ -8,7 +8,6 @@ import freechips.rocketchip.config._
 import freechips.rocketchip.rocket._
 import freechips.rocketchip.util._
 
-case object BuildCore extends Field[Parameters => CoreModule with HasCoreIO]
 case object XLen extends Field[Int]
 
 // These parameters can be varied per-core
@@ -32,14 +31,17 @@ trait CoreParams {
   val nBreakpoints: Int
   val nPerfCounters: Int
   val haveBasicCounters: Boolean
+  val haveFSDirty: Boolean
   val misaWritable: Boolean
   val nL2TLBEntries: Int
   val mtvecInit: Option[BigInt]
   val mtvecWritable: Boolean
   val tileControlAddr: Option[BigInt]
+  def customCSRs(implicit p: Parameters): CustomCSRs = new CustomCSRs
 
   def instBytes: Int = instBits / 8
   def fetchBytes: Int = fetchWidth * instBytes
+  def lrscCycles: Int
 }
 
 trait HasCoreParameters extends HasTileParameters {
@@ -78,6 +80,7 @@ trait HasCoreParameters extends HasTileParameters {
   // Print out log of committed instructions and their writeback values.
   // Requires post-processing due to out-of-order writebacks.
   val enableCommitLog = false
+
 }
 
 abstract class CoreModule(implicit val p: Parameters) extends Module
