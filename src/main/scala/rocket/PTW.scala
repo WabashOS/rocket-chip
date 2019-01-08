@@ -280,9 +280,10 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     io.requestor(i).pmp := io.dpath.pmp
   }
 
+  val hasPFA = p(PFAKey).nonEmpty
   val pfa_pteppn = RegInit(UInt(0, 54))
   val pfa_rpte = Reg(new RemotePTE)
-  if (p(HasPFA)) {
+  if (hasPFA) {
     io.pfa.req.valid := state === s_pfareq
     io.pfa.req.bits.reserved := pfa_rpte.reserved
     io.pfa.req.bits.pageid := pfa_rpte.pageid
@@ -332,7 +333,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     }
   }
 
-  if (p(HasPFA)) {
+  if (hasPFA) {
     when (io.pfa.req.fire()) { next_state := s_pfawait }
     when (io.pfa.resp.fire()) {
       r_pte := new PTE().fromBits(io.pfa.resp.bits)
@@ -373,7 +374,7 @@ class PTW(n: Int)(implicit edge: TLEdgeOut, p: Parameters) extends CoreModule()(
     when (traverse) {
       next_state := s_req
       count := count + 1
-    } .elsewhen (!pte.v && pte.r && io.pfa.fpq_avail && Bool(p(HasPFA))) {
+    } .elsewhen (!pte.v && pte.r && io.pfa.fpq_avail && Bool(hasPFA)) {
       pfa_rpte := new RemotePTE().fromBits(io.mem.resp.bits.data)
       pfa_pteppn := pte_addr
       state := s_pfareq

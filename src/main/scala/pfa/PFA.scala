@@ -10,7 +10,8 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util.{TwoWayCounter, UIntIsOneOf, DecoupledHelper}
 import freechips.rocketchip.pfa._
 
-case object HasPFA extends Field[Boolean]
+case class PFAConfig(qDepth: Int = 64)
+case object PFAKey extends Field[Option[PFAConfig]]
 
 class EvictIO extends Bundle {
   // requests are pfns and they are handled in PFAEvictPath
@@ -291,8 +292,9 @@ trait PFAControllerBundle extends Bundle {
 }
 
 trait PFAControllerModule extends HasRegMap {
+  implicit val p: Parameters
   val io: PFAControllerBundle
-  val qDepth = 64
+  val qDepth = p(PFAKey).get.qDepth
 
   val evictQueue = Module(new Queue(UInt(64.W), qDepth))
   val evictsInProg = TwoWayCounter(io.evict.req.fire(), io.evict.resp.fire(), qDepth)
@@ -369,10 +371,10 @@ trait HasPeripheryPFA { this: BaseSubsystem =>
   private val pfaAddr = BigInt(0x10017000)
   private val portName = "PFA"
 
-  val pfaOpt = if (p(HasPFA)) {
+  val pfaOpt = p(PFAKey).map { pfaKey =>
     val pfa = LazyModule(new PFA(pfaAddr, clientAddr, sbus.beatBytes))
     sbus.toVariableWidthSlave(Some(portName)) { pfa.mmionode }
     sbus.fromPort(Some(portName))() :=* pfa.dmanode
-    Some(pfa)
-  } else None
+    pfa
+  }
 }
