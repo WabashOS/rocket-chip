@@ -204,7 +204,7 @@ class PFAFetchPathModule(outer: PFAFetchPath) extends LazyModuleImp(outer) {
   val canTakeReq = (state === s_idle) && !io.evictinprog
   io.fetch.req.ready := io.free.valid && canTakeReq
   io.free.ready := io.fetch.req.valid && canTakeReq
-  io.fetch.fpq_avail := io.free.valid
+  io.fetch.fpq_avail := io.free.valid && io.newpages.req.ready
   io.inprog := state =/= s_idle
 
   val compHelper = DecoupledHelper(
@@ -309,8 +309,8 @@ trait PFAControllerModule extends HasRegMap {
 
   val newPageidQueue = Module(new Queue(UInt(52.W), qDepth))
   val newVaddrQueue = Module(new Queue(UInt(39.W), qDepth))
-  newPageidQueue.io.enq.valid := io.newpages.req.valid
-  newVaddrQueue.io.enq.valid := io.newpages.req.valid
+  newPageidQueue.io.enq.valid := io.newpages.req.valid && newVaddrQueue.io.enq.ready
+  newVaddrQueue.io.enq.valid := io.newpages.req.valid && newPageidQueue.io.enq.ready
   io.newpages.req.ready := newPageidQueue.io.enq.ready && newVaddrQueue.io.enq.ready
   newPageidQueue.io.enq.bits := Cat(io.newpages.req.bits.reserved, io.newpages.req.bits.pageid)
   newVaddrQueue.io.enq.bits := io.newpages.req.bits.vaddr
