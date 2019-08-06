@@ -7,7 +7,7 @@ import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.regmapper.{HasRegMap, RegField}
 import freechips.rocketchip.subsystem.BaseSubsystem
 import freechips.rocketchip.tilelink._
-import freechips.rocketchip.util.{TwoWayCounter, UIntIsOneOf, DecoupledHelper}
+import freechips.rocketchip.util.{TwoWayCounter, UIntIsOneOf, DecoupledHelper, HellaQueue}
 import freechips.rocketchip.pfa._
 
 case class PFAConfig(qDepth: Int = 64)
@@ -296,19 +296,26 @@ trait PFAControllerModule extends HasRegMap {
   val io: PFAControllerBundle
   val qDepth = p(PFAKey).get.qDepth
 
-  val evictQueue = Module(new Queue(UInt(64.W), qDepth))
+  val evictQueue = Module(new HellaQueue(qDepth)(UInt(64.W)))
+  val evictQueueCnt = TwoWayCounter(evictQueue.io.enq.fire(), evictQueue.io.deq.fire(), qDepth)
   val evictsInProg = TwoWayCounter(io.evict.req.fire(), io.evict.resp.fire(), qDepth)
   val evictStat = Wire(init = (0.U(64.W)))
   io.evict.req <> evictQueue.io.deq
   io.evict.resp.ready := true.B // control always ready for eviction resp
   evictStat := Mux(io.fetchinprog, qDepth.U,
-                   Mux(evictsInProg > evictQueue.io.count, evictsInProg, evictQueue.io.count))
+                   Mux(evictsInProg > evictQueueCnt, evictsInProg, evictQueueCnt))
 
-  val freeQueue = Module(new Queue(UInt(64.W), qDepth))
+  val freeQueue = Module(new HellaQueue(qDepth)(UInt(64.W)))
+  val freeQueueCnt = TwoWayCounter(freeQueue.io.enq.fire(), freeQueue.io.deq.fire(), qDepth)
   io.free <> freeQueue.io.deq
 
-  val newPageidQueue = Module(new Queue(UInt(52.W), qDepth))
-  val newVaddrQueue = Module(new Queue(UInt(39.W), qDepth))
+  /* The newq is presented as two queues through MMIO, but one queue internally. 
+   * They are fused into io.newpages.*/
+  val newPageidQueue = Module(new HellaQueue(qDepth)(UInt(52.W)))
+  val newPageidQueueCnt = TwoWayCounter(newPageidQueue.io.enq.fire(), newPageidQueue.io.deq.fire(), qDepth)
+  val newVaddrQueue = Module(new HellaQueue(qDepth)(UInt(39.W)))
+  val newVaddrQueueCnt = TwoWayCounter(newVaddrQueue.io.enq.fire(), newVaddrQueue.io.deq.fire(), qDepth)
+  val newStat = newVaddrQueueCnt.max(newPageidQueueCnt)
   newPageidQueue.io.enq.valid := io.newpages.req.valid && newVaddrQueue.io.enq.ready
   newVaddrQueue.io.enq.valid := io.newpages.req.valid && newPageidQueue.io.enq.ready
   io.newpages.req.ready := newPageidQueue.io.enq.ready && newVaddrQueue.io.enq.ready
@@ -320,13 +327,13 @@ trait PFAControllerModule extends HasRegMap {
 
   regmap(
     0 -> Seq(RegField.w(64, freeQueue.io.enq)),              // free queue
-    8 -> Seq(RegField.r(64, qDepth.U - freeQueue.io.count)), // free stat
+    8 -> Seq(RegField.r(64, qDepth.U - freeQueueCnt)),       // free stat
     16 -> Seq(RegField.w(64, evictQueue.io.enq)),            // evict queue
     24 -> Seq(RegField.r(64, qDepth.U - evictStat)),         // evict stat
     32 -> Seq(RegField.r(64, newPageidQueue.io.deq)),        // new pageid queue
     40 -> Seq(RegField.r(64, newVaddrQueue.io.deq)),         // new vaddr queue
-    48 -> Seq(RegField.r(64, newPageidQueue.io.count)),      // new stat
-    56 -> Seq(RegField(48, dstmac)))          // remote MAC
+    48 -> Seq(RegField.r(64, newStat)),      // new stat
+    56 -> Seq(RegField(48, dstmac)))                         // remote MAC
 }
 
 class PFAController(c: PFAControllerParams)(implicit p: Parameters)
